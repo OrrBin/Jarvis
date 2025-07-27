@@ -127,21 +127,31 @@ class MessageProcessor {
     }
     
     // Get chat information
-    let chatId = 'unknown';
+    let chatInfo = {
+      id: 'unknown',
+      name: 'Unknown',
+      isGroup: false
+    };
+    
     try {
       if (chat) {
-        chatId = chat.id._serialized || chat.id.user || message.from || 'unknown';
+        chatInfo = {
+          id: chat.id._serialized || chat.id.user || message.from || 'unknown',
+          name: chat.name || chat.id.user || 'Unknown',
+          isGroup: chat.isGroup || false
+        };
       } else {
-        chatId = message.from || 'unknown';
+        chatInfo.id = message.from || 'unknown';
       }
     } catch (error) {
       console.log('⚠️ Could not get chat info, using fallback');
-      chatId = message.from || 'unknown';
+      chatInfo.id = message.from || 'unknown';
     }
     
     return {
       id: message.id?.id || message.id || `msg_${Date.now()}_${Math.random()}`,
-      chatId,
+      chatId: chatInfo.id,
+      chatName: chatInfo.name,
       senderName,
       senderNumber,
       content: body.trim(),
@@ -152,6 +162,7 @@ class MessageProcessor {
       hasMedia: message.hasMedia || false,
       mediaType: message.type || 'text',
       isFromMe: message.fromMe || false,
+      isGroupMessage: chatInfo.isGroup,
     };
   }
 

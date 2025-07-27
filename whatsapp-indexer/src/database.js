@@ -31,6 +31,7 @@ class Database {
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         chat_id TEXT NOT NULL,
+        chat_name TEXT,
         sender_name TEXT NOT NULL,
         sender_number TEXT NOT NULL,
         content TEXT NOT NULL,
@@ -38,6 +39,7 @@ class Database {
         message_type TEXT NOT NULL,
         has_urls BOOLEAN DEFAULT FALSE,
         is_from_me BOOLEAN DEFAULT FALSE,
+        is_group_message BOOLEAN DEFAULT FALSE,
         created_at INTEGER DEFAULT (strftime('%s', 'now'))
       )
     `;
@@ -59,7 +61,9 @@ class Database {
       'CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)',
       'CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_name)',
       'CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id)',
+      'CREATE INDEX IF NOT EXISTS idx_messages_chat_name ON messages(chat_name)',
       'CREATE INDEX IF NOT EXISTS idx_messages_from_me ON messages(is_from_me)',
+      'CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(is_group_message)',
       'CREATE INDEX IF NOT EXISTS idx_urls_message ON urls(message_id)',
       'CREATE INDEX IF NOT EXISTS idx_urls_domain ON urls(domain)',
     ];
@@ -69,48 +73,107 @@ class Database {
         this.db.run(createMessagesTable);
         this.db.run(createUrlsTable);
         
-        // Add migration for existing databases - check if column exists first
+        // Add migration for existing databases - check if columns exist first
         this.db.all("PRAGMA table_info(messages)", (err, columns) => {
           if (err) {
             console.log('Migration check error:', err.message);
+            // Create indexes and resolve even if migration check fails
+            for (const index of createIndexes) {
+              this.db.run(index);
+            }
+            resolve();
           } else {
-            const hasIsFromMeColumn = columns.some(col => col.name === 'is_from_me');
-            if (!hasIsFromMeColumn) {
+            const columnNames = columns.map(col => col.name);
+            let migrationsCompleted = 0;
+            const totalMigrations = 3;
+            
+            const checkMigrationComplete = () => {
+              migrationsCompleted++;
+              if (migrationsCompleted === totalMigrations) {
+                // Create indexes after migrations are complete
+                for (const index of createIndexes) {
+                  this.db.run(index);
+                }
+                resolve();
+              }
+            };
+            
+            // Check and add is_from_me column
+            if (!columnNames.includes('is_from_me')) {
               console.log('🔄 Adding is_from_me column to existing database...');
               this.db.run(`ALTER TABLE messages ADD COLUMN is_from_me BOOLEAN DEFAULT FALSE`, (err) => {
-                if (err) {
-                  console.log('Migration error (this is normal if column already exists):', err.message);
+                if (err && !err.message.includes('duplicate column name')) {
+                  console.log('Migration error for is_from_me:', err.message);
                 } else {
                   console.log('✅ Successfully added is_from_me column');
                 }
+                checkMigrationComplete();
               });
+            } else {
+              checkMigrationComplete();
+            }
+            
+            // Check and add chat_name column
+            if (!columnNames.includes('chat_name')) {
+              console.log('🔄 Adding chat_name column to existing database...');
+              this.db.run(`ALTER TABLE messages ADD COLUMN chat_name TEXT`, (err) => {
+                if (err && !err.message.includes('duplicate column name')) {
+                  console.log('Migration error for chat_name:', err.message);
+                } else {
+                  console.log('✅ Successfully added chat_name column');
+                }
+                checkMigrationComplete();
+              });
+            } else {
+              checkMigrationComplete();
+            }
+            
+            // Check and add is_group_message column
+            if (!columnNames.includes('is_group_message')) {
+              console.log('🔄 Adding is_group_message column to existing database...');
+              this.db.run(`ALTER TABLE messages ADD COLUMN is_group_message BOOLEAN DEFAULT FALSE`, (err) => {
+                if (err && !err.message.includes('duplicate column name')) {
+                  console.log('Migration error for is_group_message:', err.message);
+                } else {
+                  console.log('✅ Successfully added is_group_message column');
+                }
+                checkMigrationComplete();
+              });
+            } else {
+              checkMigrationComplete();
             }
           }
         });
-        
-        for (const index of createIndexes) {
-          this.db.run(index);
-        }
-        
-        resolve();
       });
     });
   }
 
   async saveMessage(messageData) {
-    const { id, chatId, senderName, senderNumber, content, timestamp, messageType, urls = [], isFromMe = false } = messageData;
+    const { 
+      id, 
+      chatId, 
+      chatName, 
+      senderName, 
+      senderNumber, 
+      content, 
+      timestamp, 
+      messageType, 
+      urls = [], 
+      isFromMe = false,
+      isGroupMessage = false 
+    } = messageData;
     
     return new Promise((resolve, reject) => {
       this.db.serialize(() => {
         // Insert message
         const insertMessage = `
           INSERT OR REPLACE INTO messages 
-          (id, chat_id, sender_name, sender_number, content, timestamp, message_type, has_urls, is_from_me)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, chat_id, chat_name, sender_name, sender_number, content, timestamp, message_type, has_urls, is_from_me, is_group_message)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         
         this.db.run(insertMessage, [
-          id, chatId, senderName, senderNumber, content, timestamp, messageType, urls.length > 0, isFromMe
+          id, chatId, chatName, senderName, senderNumber, content, timestamp, messageType, urls.length > 0, isFromMe, isGroupMessage
         ], function(err) {
           if (err) {
             reject(err);
@@ -231,6 +294,99 @@ class Database {
           reject(err);
         } else {
           resolve(row.last_timestamp);
+        }
+      });
+    });
+  }
+
+  async getGroupMessages(groupName, limit = 20) {
+    return new Promise((resolve, reject) => {
+      const sql = `
+        SELECT m.*, GROUP_CONCAT(u.url) as urls
+        FROM messages m
+        LEFT JOIN urls u ON m.id = u.message_id
+        WHERE m.is_group_message = TRUE AND m.chat_name LIKE ?
+        GROUP BY m.id
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+      `;
+      
+      this.db.all(sql, [`%${groupName}%`, limit], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  }
+
+  async listGroups() {
+    return new Promise((resolve, reject) => {
+      const sql = `
+        SELECT 
+          chat_name,
+          chat_id,
+          COUNT(*) as message_count,
+          MAX(timestamp) as last_message_time,
+          COUNT(DISTINCT sender_name) as participant_count
+        FROM messages 
+        WHERE is_group_message = TRUE AND chat_name IS NOT NULL
+        GROUP BY chat_id, chat_name
+        ORDER BY last_message_time DESC
+      `;
+      
+      this.db.all(sql, (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  }
+
+  async searchInGroup(groupName, query, limit = 10) {
+    return new Promise((resolve, reject) => {
+      const sql = `
+        SELECT m.*, GROUP_CONCAT(u.url) as urls
+        FROM messages m
+        LEFT JOIN urls u ON m.id = u.message_id
+        WHERE m.is_group_message = TRUE 
+          AND m.chat_name LIKE ? 
+          AND (m.content LIKE ? OR m.sender_name LIKE ?)
+        GROUP BY m.id
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+      `;
+      
+      this.db.all(sql, [`%${groupName}%`, `%${query}%`, `%${query}%`, limit], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  }
+
+  async getIndividualMessages(limit = 20) {
+    return new Promise((resolve, reject) => {
+      const sql = `
+        SELECT m.*, GROUP_CONCAT(u.url) as urls
+        FROM messages m
+        LEFT JOIN urls u ON m.id = u.message_id
+        WHERE m.is_group_message = FALSE
+        GROUP BY m.id
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+      `;
+      
+      this.db.all(sql, [limit], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
         }
       });
     });

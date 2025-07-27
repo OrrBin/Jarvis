@@ -196,6 +196,70 @@ class WhatsAppMCPServer {
               required: ['day'],
             },
           },
+          {
+            name: 'list_groups',
+            description: 'List all WhatsApp groups with message counts and activity',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+          },
+          {
+            name: 'get_group_messages',
+            description: 'Get messages from a specific WhatsApp group',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                group_name: {
+                  type: 'string',
+                  description: 'Name of the group to get messages from',
+                },
+                limit: {
+                  type: 'number',
+                  description: 'Maximum number of messages to return (default: 20)',
+                  default: 20,
+                },
+              },
+              required: ['group_name'],
+            },
+          },
+          {
+            name: 'search_in_group',
+            description: 'Search for messages within a specific WhatsApp group',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                group_name: {
+                  type: 'string',
+                  description: 'Name of the group to search in',
+                },
+                query: {
+                  type: 'string',
+                  description: 'Search query for messages within the group',
+                },
+                limit: {
+                  type: 'number',
+                  description: 'Maximum number of results to return (default: 10)',
+                  default: 10,
+                },
+              },
+              required: ['group_name', 'query'],
+            },
+          },
+          {
+            name: 'get_individual_messages',
+            description: 'Get messages from individual (non-group) chats only',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                limit: {
+                  type: 'number',
+                  description: 'Maximum number of messages to return (default: 20)',
+                  default: 20,
+                },
+              },
+            },
+          },
         ],
       };
     });
@@ -240,6 +304,18 @@ class WhatsAppMCPServer {
           
           case 'check_plans_for_day':
             return await this.handleCheckPlansForDay(args);
+          
+          case 'list_groups':
+            return await this.handleListGroups(args);
+          
+          case 'get_group_messages':
+            return await this.handleGetGroupMessages(args);
+          
+          case 'search_in_group':
+            return await this.handleSearchInGroup(args);
+          
+          case 'get_individual_messages':
+            return await this.handleGetIndividualMessages(args);
           
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -712,6 +788,147 @@ ${urls ? `**URLs:** ${urls}` : ''}
       };
     } catch (error) {
       throw new Error(`Failed to check plans: ${error.message}`);
+    }
+  }
+
+  async handleListGroups(args) {
+    try {
+      const groups = await this.database.listGroups();
+      
+      if (groups.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No groups found in the database.',
+            },
+          ],
+        };
+      }
+
+      const formattedGroups = groups.map(group => {
+        const lastMessageDate = new Date(group.last_message_time).toLocaleDateString();
+        return `**${group.chat_name}**\n- Messages: ${group.message_count}\n- Participants: ${group.participant_count}\n- Last activity: ${lastMessageDate}`;
+      }).join('\n\n');
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Found ${groups.length} groups:\n\n${formattedGroups}`,
+          },
+        ],
+      };
+    } catch (error) {
+      throw new Error(`Failed to list groups: ${error.message}`);
+    }
+  }
+
+  async handleGetGroupMessages(args) {
+    const { group_name, limit = 20 } = args;
+    
+    try {
+      const messages = await this.database.getGroupMessages(group_name, limit);
+      
+      if (messages.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No messages found in group "${group_name}".`,
+            },
+          ],
+        };
+      }
+
+      const formattedMessages = messages.map(msg => {
+        const date = new Date(msg.timestamp).toLocaleString();
+        const urls = msg.urls ? `\nURLs: ${msg.urls}` : '';
+        return `**${date} - ${msg.sender_name}:** ${msg.content}${urls}`;
+      }).join('\n\n');
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Found ${messages.length} messages in group "${group_name}":\n\n${formattedMessages}`,
+          },
+        ],
+      };
+    } catch (error) {
+      throw new Error(`Failed to get group messages: ${error.message}`);
+    }
+  }
+
+  async handleSearchInGroup(args) {
+    const { group_name, query, limit = 10 } = args;
+    
+    try {
+      const messages = await this.database.searchInGroup(group_name, query, limit);
+      
+      if (messages.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No messages found matching "${query}" in group "${group_name}".`,
+            },
+          ],
+        };
+      }
+
+      const formattedMessages = messages.map(msg => {
+        const date = new Date(msg.timestamp).toLocaleString();
+        const urls = msg.urls ? `\nURLs: ${msg.urls}` : '';
+        return `**${date} - ${msg.sender_name}:** ${msg.content}${urls}`;
+      }).join('\n\n');
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Found ${messages.length} messages matching "${query}" in group "${group_name}":\n\n${formattedMessages}`,
+          },
+        ],
+      };
+    } catch (error) {
+      throw new Error(`Failed to search in group: ${error.message}`);
+    }
+  }
+
+  async handleGetIndividualMessages(args) {
+    const { limit = 20 } = args;
+    
+    try {
+      const messages = await this.database.getIndividualMessages(limit);
+      
+      if (messages.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No individual messages found.',
+            },
+          ],
+        };
+      }
+
+      const formattedMessages = messages.map(msg => {
+        const date = new Date(msg.timestamp).toLocaleString();
+        const urls = msg.urls ? `\nURLs: ${msg.urls}` : '';
+        return `**${date} - ${msg.sender_name}:** ${msg.content}${urls}`;
+      }).join('\n\n');
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Found ${messages.length} individual messages:\n\n${formattedMessages}`,
+          },
+        ],
+      };
+    } catch (error) {
+      throw new Error(`Failed to get individual messages: ${error.message}`);
     }
   }
 
