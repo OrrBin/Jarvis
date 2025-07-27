@@ -8,7 +8,10 @@ import MessageProcessor from './message-processor.js';
 class WhatsAppClient {
   constructor() {
     this.client = new Client({
-      authStrategy: new LocalAuth(),
+      authStrategy: new LocalAuth({
+        clientId: "whatsapp-indexer",
+        dataPath: "./.wwebjs_auth"
+      }),
       puppeteer: {
         headless: true,
         args: [
@@ -18,10 +21,16 @@ class WhatsAppClient {
           '--disable-accelerated-2d-canvas',
           '--no-first-run',
           '--no-zygote',
-          '--disable-gpu'
+          '--disable-gpu',
+          '--disable-web-security',
+          '--disable-features=VizDisplayCompositor'
         ],
         timeout: 60000,
       },
+      webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+      }
     });
     
     this.database = new Database();
@@ -48,6 +57,7 @@ class WhatsAppClient {
     this.client.on('qr', (qr) => {
       console.log('📱 Scan this QR code with your WhatsApp:');
       qrcode.generate(qr, { small: true });
+      console.log('💡 After scanning, the session will be saved for future use');
     });
 
     this.client.on('ready', () => {
@@ -56,16 +66,32 @@ class WhatsAppClient {
     });
 
     this.client.on('authenticated', () => {
-      console.log('🔐 WhatsApp client authenticated');
+      console.log('🔐 WhatsApp client authenticated - session saved');
     });
 
     this.client.on('auth_failure', (msg) => {
       console.error('❌ Authentication failed:', msg);
+      console.log('🔄 You may need to scan the QR code again');
     });
 
     this.client.on('disconnected', (reason) => {
       console.log('📱 WhatsApp client disconnected:', reason);
       this.isReady = false;
+      
+      // If disconnected due to session issues, log helpful info
+      if (reason === 'NAVIGATION') {
+        console.log('💡 Session may have expired. You might need to scan QR code again.');
+      }
+    });
+
+    // Add loading session event
+    this.client.on('loading_screen', (percent, message) => {
+      console.log(`⏳ Loading: ${percent}% - ${message}`);
+    });
+
+    // Add session restoration event
+    this.client.on('change_state', (state) => {
+      console.log('🔄 WhatsApp state changed:', state);
     });
 
     // Main message handler
