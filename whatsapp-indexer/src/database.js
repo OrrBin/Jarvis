@@ -222,7 +222,7 @@ class Database {
     });
   }
 
-  async getMessagesByDateRange(startDate, endDate, senderName = null) {
+  async getMessagesByDateRange(startDate, endDate, senderName = null, chatId = null) {
     return new Promise((resolve, reject) => {
       let sql = `
         SELECT m.*, GROUP_CONCAT(u.url) as urls
@@ -236,6 +236,11 @@ class Database {
       if (senderName) {
         sql += ' AND m.sender_name LIKE ?';
         params.push(`%${senderName}%`);
+      }
+      
+      if (chatId) {
+        sql += ' AND m.chat_id = ?';
+        params.push(chatId);
       }
       
       sql += ' GROUP BY m.id ORDER BY m.timestamp DESC';
@@ -294,6 +299,20 @@ class Database {
           reject(err);
         } else {
           resolve(row.last_timestamp);
+        }
+      });
+    });
+  }
+
+  async messageExists(messageId) {
+    return new Promise((resolve, reject) => {
+      const sql = 'SELECT 1 FROM messages WHERE id = ? LIMIT 1';
+      
+      this.db.get(sql, [messageId], (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(!!row);
         }
       });
     });

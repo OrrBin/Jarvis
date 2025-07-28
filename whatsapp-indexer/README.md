@@ -29,6 +29,8 @@ The system consists of two main components:
 - **Sender Filtering**: Filter messages by specific senders
 - **Schedule Detection**: Find scheduling-related conversations
 - **Plan Checking**: Check for plans on specific days
+- **Chat Discovery**: List all chats with identifiers for selective indexing
+- **Historical Backfill**: Index messages from past days/weeks/months
 - **Persistent Storage**: SQLite database with full-text search
 - **Vector Search**: Local FAISS-based semantic search using Transformers.js
 
@@ -81,6 +83,76 @@ For backward compatibility, you can still run the old combined mode:
 ```bash
 ./start-mcp.sh
 ```
+
+## Chat Discovery
+
+Before running backfill operations, you can list all your WhatsApp chats to identify which ones you want to include or exclude:
+
+### List All Chats
+```bash
+./list-chats.sh
+```
+
+This shows all your chats sorted by most recent activity, with their names and IDs.
+
+### Filter Options
+```bash
+# Show only group chats
+./list-chats.sh --groups-only
+
+# Show only individual chats  
+./list-chats.sh --individual-only
+
+# Show top 20 most recent chats
+./list-chats.sh --limit 20
+
+# Show detailed information
+./list-chats.sh --verbose
+```
+
+### Using Chat Information for Backfill
+After listing chats, you can use their names or IDs in backfill commands:
+
+```bash
+# Backfill specific chats by name
+./start-backfill.sh --chat "Family Group" --chat "Work Team" --days 7
+
+# Exclude specific chats
+./start-backfill.sh --exclude "Noisy Group" --exclude "Spam" --days 30
+```
+
+## Historical Backfill
+
+Index messages from the past using the backfill script:
+
+### Basic Usage
+```bash
+# Backfill last 7 days (default)
+./start-backfill.sh
+
+# Backfill specific time period
+./start-backfill.sh --days 30
+
+# Test without saving (dry run)
+./start-backfill.sh --dry-run --verbose --days 7
+```
+
+### Advanced Options
+```bash
+# Specific chats only
+./start-backfill.sh --chat "Important Group" --days 14
+
+# Exclude certain chats
+./start-backfill.sh --exclude "Work" --exclude "Notifications" --days 30
+
+# Limit messages per chat
+./start-backfill.sh --max-messages 500 --days 60
+
+# Force re-indexing
+./start-backfill.sh --force --days 7
+```
+
+See [BACKFILL.md](BACKFILL.md) for detailed backfill documentation.
 
 ## MCP Tools
 
