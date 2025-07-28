@@ -7,7 +7,6 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "mcp-server": "node src/mcp-server.js",
     "mcp-standalone": "node src/mcp-server-standalone.js",
     "listener": "node src/whatsapp-listener.js",
     "test-standalone": "node test-standalone.js",

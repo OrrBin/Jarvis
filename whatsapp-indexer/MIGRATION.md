@@ -1,23 +1,17 @@
-# Migration Guide: Decoupled Architecture
+# Architecture Guide: Decoupled WhatsApp Indexer
 
-This document explains the changes made to decouple the WhatsApp MCP server from the WhatsApp client, creating a more robust and maintainable architecture.
+This document explains the decoupled architecture of the WhatsApp indexer, which provides better reliability and maintainability.
 
-## What Changed
+## Architecture Overview
 
-### Before (Coupled Architecture)
-- Single `mcp-server.js` that both connected to WhatsApp AND served MCP requests
-- MCP server would fail if WhatsApp connection failed
-- Couldn't query messages without an active WhatsApp connection
-- Tight coupling between WhatsApp client and MCP functionality
-
-### After (Decoupled Architecture)
+### Current Architecture (Decoupled)
 - **WhatsApp Listener Service** (`whatsapp-listener.js`): Handles WhatsApp connection and message indexing
 - **Standalone MCP Server** (`mcp-server-standalone.js`): Only reads from database/vector store
 - Services can run independently
 - MCP server works even if WhatsApp is disconnected
 - Better reliability and maintainability
 
-## New Components
+## Components
 
 ### 1. WhatsApp Listener Service (`src/whatsapp-listener.js`)
 - Connects to WhatsApp Web
@@ -105,18 +99,9 @@ Simply follow the updated README instructions:
 - WhatsApp listener runs independently
 - Easy to add more data sources
 
-## Backward Compatibility
-
-The old combined mode is still available:
-```bash
-./start-mcp.sh  # Uses the original mcp-server.js
-```
-
-However, the new decoupled approach is recommended for all new deployments.
-
 ## File Changes Summary
 
-### New Files
+### Core Files
 - `src/mcp-server-standalone.js` - Standalone MCP server
 - `src/whatsapp-listener.js` - WhatsApp message listener
 - `start-mcp-standalone.sh` - Startup script for MCP server
@@ -154,8 +139,8 @@ However, the new decoupled approach is recommended for all new deployments.
 
 ## Support
 
-If you encounter issues with the migration:
+If you encounter issues:
 1. Run `node test-standalone.js` to verify components
 2. Check the logs from both services
 3. Ensure all dependencies are installed: `npm install`
-4. Try the legacy mode temporarily: `./start-mcp.sh`
+4. Verify your `.env` configuration is correct

@@ -76,14 +76,6 @@ If you already have indexed messages and just want to query them:
 ./start-mcp-standalone.sh
 ```
 
-### Option 3: Legacy Combined Mode (Not Recommended)
-
-For backward compatibility, you can still run the old combined mode:
-
-```bash
-./start-mcp.sh
-```
-
 ## Chat Discovery
 
 Before running backfill operations, you can list all your WhatsApp chats to identify which ones you want to include or exclude:
@@ -257,13 +249,13 @@ LOG_LEVEL=info
 ### Project Structure
 ```
 src/
-├── mcp-server-standalone.js    # Standalone MCP server
+├── mcp-server-standalone.js    # Standalone MCP server (recommended)
 ├── whatsapp-listener.js        # WhatsApp message listener
 ├── database.js                 # SQLite database operations
 ├── local-vector-store.js       # FAISS vector store
 ├── message-processor.js        # Message processing logic
 ├── config.js                   # Configuration management
-└── mcp-server.js              # Legacy combined server
+└── backfill-script.js          # Historical message backfill
 ```
 
 ### Adding New Features
