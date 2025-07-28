@@ -118,14 +118,31 @@ class LocalVectorStore {
   }
 
   async indexMessage(messageData) {
-    const { id, content, senderName, senderNumber, timestamp, chatId, urls = [], isFromMe = false } = messageData;
+    const { 
+      id, 
+      content, 
+      senderName, 
+      senderNumber, 
+      timestamp, 
+      chatId, 
+      chatName, 
+      urls = [], 
+      isFromMe = false,
+      isGroupMessage = false 
+    } = messageData;
     
     try {
       // Create searchable text combining message content and context
       const searchableText = `${content} from ${senderName}`;
       
+      // Create descriptive display for logging
+      const chatDisplay = isGroupMessage 
+        ? `group "${chatName}"` 
+        : `"${chatName}"`;
+      const senderDisplay = isFromMe ? "Me" : senderName;
+      
       // Generate embedding
-      console.error(`🔄 Generating embedding for message from ${senderName}...`);
+      console.error(`🔄 Generating embedding for message in ${chatDisplay} from ${senderDisplay}...`);
       const embedding = await this.generateEmbedding(searchableText);
       
       if (!Array.isArray(embedding) || embedding.length !== config.vectorStore.dimension) {
@@ -137,7 +154,7 @@ class LocalVectorStore {
       
       if (existingIndex !== -1) {
         // Update existing message
-        console.error(`🔄 Updating existing message from ${senderName}`);
+        console.error(`🔄 Updating existing message in ${chatDisplay} from ${senderDisplay}`);
         
         // Remove old vector
         // Note: FAISS doesn't support direct removal, so we'll mark as deleted
@@ -150,11 +167,13 @@ class LocalVectorStore {
         senderName,
         senderNumber,
         chatId,
+        chatName,
         timestamp,
         content: content.substring(0, 1000), // Limit content size in metadata
         hasUrls: urls.length > 0,
         urlCount: urls.length,
         isFromMe: isFromMe,
+        isGroupMessage: isGroupMessage,
         deleted: false,
         indexPosition: this.metadata.length, // Track position in FAISS index
       };
@@ -177,10 +196,10 @@ class LocalVectorStore {
         await this.saveIndex();
       }
       
-      console.error(`✅ Indexed message from ${senderName} (total: ${this.metadata.length})`);
+      console.error(`✅ Indexed message in ${chatDisplay} from ${senderDisplay} (total: ${this.metadata.length})`);
     } catch (error) {
       console.error('Error indexing message:', error);
-      console.error('Message data:', { id, senderName, contentLength: content?.length });
+      console.error('Message data:', { id, senderName, chatName, contentLength: content?.length });
       throw error;
     }
   }

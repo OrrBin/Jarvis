@@ -98,35 +98,7 @@ class MessageProcessor {
     const dates = this.extractDates(body);
     const messageType = this.detectMessageType(message);
     
-    // Get sender information - handle both sent and received messages
-    let senderName = 'Unknown';
-    let senderNumber = message.from || 'unknown';
-    
-    if (message.fromMe) {
-      // This is a message sent by the user
-      senderName = 'Me';
-      senderNumber = 'me';
-      console.log('📤 Processing sent message');
-    } else {
-      // This is a received message
-      try {
-        if (contact) {
-          senderName = contact.pushname || contact.name || contact.number || 'Unknown';
-          senderNumber = contact.number || message.from || 'unknown';
-        } else {
-          // Fallback for group messages or when contact is not available
-          senderName = message.from || 'Unknown';
-          senderNumber = message.from || 'unknown';
-        }
-        console.log('📥 Processing received message');
-      } catch (error) {
-        console.log('⚠️ Could not get contact info, using fallback');
-        senderName = message.from || 'Unknown';
-        senderNumber = message.from || 'unknown';
-      }
-    }
-    
-    // Get chat information
+    // Get chat information first so we can use it in logging
     let chatInfo = {
       id: 'unknown',
       name: 'Unknown',
@@ -146,6 +118,39 @@ class MessageProcessor {
     } catch (error) {
       console.log('⚠️ Could not get chat info, using fallback');
       chatInfo.id = message.from || 'unknown';
+    }
+
+    // Get sender information - handle both sent and received messages
+    let senderName = 'Unknown';
+    let senderNumber = message.from || 'unknown';
+    
+    // Create descriptive display for logging
+    const chatDisplay = chatInfo.isGroup 
+      ? `group "${chatInfo.name}"` 
+      : `"${chatInfo.name}"`;
+    
+    if (message.fromMe) {
+      // This is a message sent by the user
+      senderName = 'Me';
+      senderNumber = 'me';
+      console.log(`📤 Processing sent message in ${chatDisplay}`);
+    } else {
+      // This is a received message
+      try {
+        if (contact) {
+          senderName = contact.pushname || contact.name || contact.number || 'Unknown';
+          senderNumber = contact.number || message.from || 'unknown';
+        } else {
+          // Fallback for group messages or when contact is not available
+          senderName = message.from || 'Unknown';
+          senderNumber = message.from || 'unknown';
+        }
+        console.log(`📥 Processing received message in ${chatDisplay} from ${senderName}`);
+      } catch (error) {
+        console.log('⚠️ Could not get contact info, using fallback');
+        senderName = message.from || 'Unknown';
+        senderNumber = message.from || 'unknown';
+      }
     }
     
     return {

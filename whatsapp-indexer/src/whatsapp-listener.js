@@ -123,7 +123,15 @@ class WhatsAppListener {
         // Add to vector store for semantic search
         await this.vectorStore.indexMessage(processedMessage);
         
-        console.log(`📝 Indexed message from ${processedMessage.senderName}: ${processedMessage.content.substring(0, 50)}...`);
+        // Create a descriptive log message showing both chat and sender
+        const chatDisplay = processedMessage.isGroupMessage 
+          ? `group "${processedMessage.chatName}"` 
+          : `"${processedMessage.chatName}"`;
+        const senderDisplay = processedMessage.isFromMe 
+          ? "Me" 
+          : processedMessage.senderName;
+        
+        console.log(`📝 Indexed message in ${chatDisplay} from ${senderDisplay}: ${processedMessage.content.substring(0, 50)}...`);
       }
     } catch (error) {
       console.error('❌ Error processing message:', error);
