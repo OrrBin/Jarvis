@@ -460,7 +460,7 @@ class EnhancedWhatsAppMCPServer {
       }
       
       // Use enhanced query for vector search
-      const results = await this.vectorStore.search(processedQuery.processedQuery, limit);
+      const results = await this.vectorStore.searchSimilar(processedQuery.processedQuery, { topK: limit });
       
       if (!results || results.length === 0) {
         return {
@@ -517,8 +517,8 @@ class EnhancedWhatsAppMCPServer {
   // Continue with other methods... (I'll add them in the next part)
   async handleStatus() {
     try {
-      const totalMessages = await this.database.getTotalMessageCount();
-      const lastMessage = await this.database.getLastMessage();
+      const totalMessages = await this.database.getMessageCount();
+      const lastMessage = await this.database.getLastMessageTime();
       
       let statusText = `📊 **WhatsApp Indexer Status**\n\n`;
       statusText += `✅ **Status:** Ready\n`;
