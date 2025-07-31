@@ -224,6 +224,38 @@ LOG_LEVEL=info
 
 ## Troubleshooting
 
+### Phone Numbers Instead of Contact Names
+
+**Problem**: Individual chats show phone numbers (e.g., "+972 54-746-6694") instead of contact names.
+
+**Cause**: WhatsApp Web sometimes doesn't have access to your phone's contact names, especially for contacts that aren't frequently messaged.
+
+**Solutions**:
+
+1. **For new messages**: The updated code now prioritizes contact names over chat names for individual chats.
+
+2. **For existing messages**: Run the contact name fixer:
+   ```bash
+   # Stop the WhatsApp listener first (only one connection allowed)
+   pkill -f whatsapp-listener.js
+   
+   # Run the fixer
+   ./fix-contact-names.sh
+   
+   # Restart the listener
+   ./start-listener.sh
+   ```
+
+3. **Manual verification**: Check what names are available:
+   ```bash
+   ./list-chats.sh --individual-only --verbose
+   ```
+
+**Note**: Some contacts may still show as phone numbers if:
+- They're not in your phone's address book
+- WhatsApp Web doesn't have permission to access contact names
+- The contact hasn't set a display name in WhatsApp
+
 ### WhatsApp Connection Issues
 - Make sure only the listener service connects to WhatsApp
 - Check QR code scanning in the listener terminal
