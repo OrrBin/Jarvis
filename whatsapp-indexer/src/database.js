@@ -164,7 +164,9 @@ class Database {
     } = messageData;
     
     return new Promise((resolve, reject) => {
-      this.db.serialize(() => {
+      const db = this.db; // Capture database reference
+      
+      db.serialize(() => {
         // Insert message
         const insertMessage = `
           INSERT OR REPLACE INTO messages 
@@ -172,7 +174,7 @@ class Database {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         
-        this.db.run(insertMessage, [
+        db.run(insertMessage, [
           id, chatId, chatName, senderName, senderNumber, content, timestamp, messageType, urls.length > 0, isFromMe, isGroupMessage
         ], function(err) {
           if (err) {
@@ -187,14 +189,26 @@ class Database {
               VALUES (?, ?, ?, ?, ?)
             `;
             
+            let urlsProcessed = 0;
+            const totalUrls = urls.length;
+            
             for (const urlData of urls) {
-              this.run(insertUrl, [
+              db.run(insertUrl, [
                 id, urlData.url, urlData.domain, urlData.title, urlData.description
-              ]);
+              ], function(urlErr) {
+                if (urlErr) {
+                  console.error('Error inserting URL:', urlErr);
+                }
+                
+                urlsProcessed++;
+                if (urlsProcessed === totalUrls) {
+                  resolve(this.lastID);
+                }
+              });
             }
+          } else {
+            resolve(this.lastID);
           }
-          
-          resolve(this.lastID);
         });
       });
     });
@@ -402,6 +416,103 @@ class Database {
       `;
       
       this.db.all(sql, [limit], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  }
+
+  // Find all conversations with a specific person across all chats
+  async findPersonInAllChats(personName, dateRange = null, limit = 50) {
+    return new Promise((resolve, reject) => {
+      let sql = `
+        SELECT 
+          m.*,
+          m.chat_name,
+          m.is_group_message,
+          GROUP_CONCAT(u.url) as urls,
+          CASE 
+            WHEN m.is_group_message = TRUE THEN 'group'
+            ELSE 'individual'
+          END as chat_type
+        FROM messages m
+        LEFT JOIN urls u ON m.id = u.message_id
+        WHERE (
+          m.sender_name LIKE ? OR 
+          m.content LIKE ? OR
+          m.chat_name LIKE ?
+        )
+      `;
+      
+      const params = [`%${personName}%`, `%${personName}%`, `%${personName}%`];
+      
+      if (dateRange) {
+        // Parse date range with correct timestamp handling (milliseconds)
+        const now = new Date();
+        let startDate, endDate;
+        
+        if (dateRange.includes('days ago') || dateRange.includes('2 days ago')) {
+          const days = parseInt(dateRange.match(/(\d+)\s*days?\s*ago/)?.[1] || '1');
+          startDate = new Date(now.getTime() - (days * 24 * 60 * 60 * 1000));
+          endDate = now;
+        } else if (dateRange.includes('yesterday')) {
+          startDate = new Date(now.getTime() - (24 * 60 * 60 * 1000));
+          endDate = new Date(now.getTime() - (12 * 60 * 60 * 1000)); // Until noon today
+        } else if (dateRange.includes('week')) {
+          const weeks = dateRange.includes('last week') ? 2 : 1;
+          startDate = new Date(now.getTime() - (weeks * 7 * 24 * 60 * 60 * 1000));
+          endDate = now;
+        } else {
+          // Default to last 7 days
+          startDate = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
+          endDate = now;
+        }
+        
+        // Convert to milliseconds for database comparison
+        sql += ` AND m.timestamp BETWEEN ? AND ?`;
+        params.push(startDate.getTime(), endDate.getTime());
+      }
+      
+      sql += `
+        GROUP BY m.id
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+      `;
+      params.push(limit);
+      
+      this.db.all(sql, params, (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  }
+
+  // Get context messages around a specific message (for better understanding)
+  async getMessageContext(messageId, contextSize = 3) {
+    return new Promise((resolve, reject) => {
+      const sql = `
+        WITH target_message AS (
+          SELECT chat_id, timestamp FROM messages WHERE id = ?
+        )
+        SELECT m.*, GROUP_CONCAT(u.url) as urls
+        FROM messages m
+        LEFT JOIN urls u ON m.id = u.message_id
+        CROSS JOIN target_message tm
+        WHERE m.chat_id = tm.chat_id
+          AND m.timestamp BETWEEN 
+            datetime(tm.timestamp, '-' || ? || ' minutes') AND 
+            datetime(tm.timestamp, '+' || ? || ' minutes')
+        GROUP BY m.id
+        ORDER BY m.timestamp ASC
+      `;
+      
+      this.db.all(sql, [messageId, contextSize * 5, contextSize * 5], (err, rows) => {
         if (err) {
           reject(err);
         } else {

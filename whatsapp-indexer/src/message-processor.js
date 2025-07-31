@@ -112,6 +112,15 @@ class MessageProcessor {
           name: chat.name || chat.id.user || 'Unknown',
           isGroup: chat.isGroup || false
         };
+        
+        // For individual chats, try to get a better name from the contact
+        if (!chat.isGroup && contact) {
+          // Priority: contact.name > contact.pushname > contact.shortName > chat.name
+          const contactName = contact.name || contact.pushname || contact.shortName;
+          if (contactName && contactName !== contact.number && !contactName.startsWith('+')) {
+            chatInfo.name = contactName;
+          }
+        }
       } else {
         chatInfo.id = message.from || 'unknown';
       }
