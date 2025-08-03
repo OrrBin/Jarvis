@@ -4,20 +4,16 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import pkg from 'whatsapp-web.js';
-const { Client, LocalAuth, MessageMedia } = pkg;
-import qrcode from 'qrcode-terminal';
 import Database from './database.js';
 import LocalVectorStore from './local-vector-store.js';
 import HebrewProcessor from './hebrew-processor.js';
-import * as chrono from 'chrono-node';
 
 class WhatsAppActionsMCPServer {
   constructor() {
     this.server = new Server(
       {
         name: 'whatsapp-actions',
-        version: '1.0.0',
+        version: '2.0.0',
       },
       {
         capabilities: {
@@ -29,116 +25,54 @@ class WhatsAppActionsMCPServer {
     this.database = new Database();
     this.vectorStore = new LocalVectorStore();
     this.hebrewProcessor = new HebrewProcessor();
-    this.whatsappClient = null;
     this.isInitialized = false;
-    this.isWhatsAppReady = false;
+    this.listenerApiUrl = process.env.WHATSAPP_API_URL || 'http://localhost:3001';
     this.setupTools();
   }
 
   async initialize() {
-    console.error('🚀 Initializing WhatsApp Actions MCP Server...');
+    console.error('🚀 Initializing WhatsApp Actions MCP Server v2...');
     
     try {
       await this.database.initialize();
       await this.vectorStore.initialize();
-      await this.initializeWhatsAppClient();
       
       this.isInitialized = true;
-      console.error('✅ WhatsApp Actions MCP Server initialized successfully');
+      console.error('✅ WhatsApp Actions MCP Server v2 initialized successfully');
+      console.error(`🔗 Connected to WhatsApp Listener API at ${this.listenerApiUrl}`);
     } catch (error) {
-      console.error('❌ Failed to initialize WhatsApp Actions MCP Server:', error);
+      console.error('❌ Failed to initialize WhatsApp Actions MCP Server v2:', error);
       throw error;
     }
   }
 
-  async initializeWhatsAppClient() {
-    console.error('📱 Initializing WhatsApp client...');
-    
-    this.whatsappClient = new Client({
-      authStrategy: new LocalAuth({
-        clientId: "whatsapp-indexer",
-        dataPath: "./.wwebjs_auth"
-      }),
-      puppeteer: {
-        headless: true,
-        args: [
-          '--no-sandbox', 
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--disable-gpu',
-          '--disable-web-security',
-          '--disable-features=VizDisplayCompositor'
-        ],
-        timeout: 60000,
-      }
-    });
-
-    this.whatsappClient.on('qr', (qr) => {
-      console.error('📱 Scan this QR code with your WhatsApp:');
-      qrcode.generate(qr, { small: true });
-    });
-
-    this.whatsappClient.on('ready', () => {
-      console.error('✅ WhatsApp client is ready!');
-      this.isWhatsAppReady = true;
-    });
-
-    this.whatsappClient.on('authenticated', () => {
-      console.error('🔐 WhatsApp client authenticated');
-    });
-
-    this.whatsappClient.on('auth_failure', (msg) => {
-      console.error('❌ Authentication failed:', msg);
-    });
-
-    this.whatsappClient.on('disconnected', (reason) => {
-      console.error('📱 WhatsApp client disconnected:', reason);
-      this.isWhatsAppReady = false;
-    });
-
-    // Listen for new messages and index them
-    this.whatsappClient.on('message', async (message) => {
-      try {
-        await this.handleIncomingMessage(message);
-      } catch (error) {
-        console.error('Error handling incoming message:', error);
-      }
-    });
-
-    await this.whatsappClient.initialize();
-  }
-
-  async handleIncomingMessage(message) {
+  async makeApiRequest(endpoint, method = 'GET', body = null) {
     try {
-      const chat = await message.getChat();
-      const contact = await message.getContact();
-      
-      // Process and save the message to database
-      const processedMessage = {
-        id: message.id.id,
-        chat_id: chat.id._serialized,
-        chat_name: chat.name || contact.name || contact.number,
-        sender_name: message.fromMe ? 'Me' : (contact.name || contact.number),
-        sender_number: message.fromMe ? 'me' : (contact.number || 'unknown'),
-        content: message.body,
-        timestamp: message.timestamp * 1000,
-        is_from_me: message.fromMe,
-        is_group_message: chat.isGroup,
-        message_type: message.type
+      const url = `${this.listenerApiUrl}${endpoint}`;
+      const options = {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+        },
       };
-
-      // Save to database
-      await this.database.saveMessage(processedMessage);
       
-      // Index in vector store
-      await this.vectorStore.indexMessage(processedMessage);
+      if (body) {
+        options.body = JSON.stringify(body);
+      }
       
-      console.error(`📨 New message indexed: ${processedMessage.sender_name} in ${processedMessage.chat_name}`);
+      const response = await fetch(url, options);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: response.statusText }));
+        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      return await response.json();
     } catch (error) {
-      console.error('Error processing incoming message:', error);
+      if (error.code === 'ECONNREFUSED') {
+        throw new Error('WhatsApp Listener service is not running. Please start it first with ./start-listener.sh');
+      }
+      throw error;
     }
   }
 
@@ -316,15 +250,20 @@ class WhatsAppActionsMCPServer {
 
   async handleStatus() {
     try {
+      // Get status from listener API
+      const listenerStatus = await this.makeApiRequest('/status');
+      
+      // Get database stats
       const totalMessages = await this.database.getMessageCount();
       const lastMessage = await this.database.getLastMessageTime();
       
       let statusText = `📊 **WhatsApp Actions MCP Server Status**\n\n`;
       statusText += `✅ **Server Status:** ${this.isInitialized ? 'Ready' : 'Initializing'}\n`;
-      statusText += `📱 **WhatsApp Client:** ${this.isWhatsAppReady ? 'Connected' : 'Disconnected'}\n`;
+      statusText += `📱 **WhatsApp Client:** ${listenerStatus.isReady ? 'Connected' : 'Disconnected'}\n`;
       statusText += `📨 **Total Messages:** ${totalMessages}\n`;
       statusText += `🔍 **Hebrew Support:** Enabled\n`;
       statusText += `🤖 **Actions:** Send messages, mark as read, live indexing\n`;
+      statusText += `🔗 **API Connection:** ${this.listenerApiUrl}\n`;
       
       if (lastMessage) {
         const lastDate = new Date(lastMessage.timestamp).toLocaleString();
@@ -409,85 +348,20 @@ class WhatsAppActionsMCPServer {
   async handleSendMessage(args) {
     const { recipient, message, reply_to_message_id } = args;
     
-    if (!this.isWhatsAppReady) {
-      throw new Error('WhatsApp client is not ready. Please wait for connection or scan QR code.');
-    }
-
     try {
-      // Find the chat by name or number
-      const chats = await this.whatsappClient.getChats();
-      let targetChat = null;
-      
-      // Try to find chat by exact name match first
-      targetChat = chats.find(chat => 
-        chat.name === recipient || 
-        chat.name?.toLowerCase() === recipient.toLowerCase()
-      );
-      
-      // If not found, try partial match
-      if (!targetChat) {
-        targetChat = chats.find(chat => 
-          chat.name?.toLowerCase().includes(recipient.toLowerCase())
-        );
-      }
-      
-      // If still not found, try to find by phone number
-      if (!targetChat) {
-        const contacts = await this.whatsappClient.getContacts();
-        const contact = contacts.find(c => 
-          c.number === recipient || 
-          c.name === recipient ||
-          c.name?.toLowerCase().includes(recipient.toLowerCase())
-        );
-        
-        if (contact) {
-          targetChat = await contact.getChat();
-        }
-      }
-      
-      if (!targetChat) {
-        throw new Error(`Could not find chat with "${recipient}". Please check the name or phone number.`);
-      }
-
-      // Send the message
-      let sentMessage;
-      if (reply_to_message_id) {
-        // Find the message to reply to
-        const messages = await targetChat.fetchMessages({ limit: 50 });
-        const messageToReply = messages.find(msg => msg.id.id === reply_to_message_id);
-        
-        if (messageToReply) {
-          sentMessage = await messageToReply.reply(message);
-        } else {
-          // If can't find the message to reply to, send as regular message
-          sentMessage = await targetChat.sendMessage(message);
-        }
-      } else {
-        sentMessage = await targetChat.sendMessage(message);
-      }
-
-      // Index the sent message
-      const processedMessage = {
-        id: sentMessage.id.id,
-        chat_id: targetChat.id._serialized,
-        chat_name: targetChat.name || recipient,
-        sender_name: 'Me',
-        sender_number: 'me', // Add the missing sender_number field
-        content: message,
-        timestamp: sentMessage.timestamp * 1000,
-        is_from_me: true,
-        is_group_message: targetChat.isGroup,
-        message_type: sentMessage.type
-      };
-
-      await this.database.saveMessage(processedMessage);
-      await this.vectorStore.indexMessage(processedMessage);
+      // Add sender_number field to prevent database constraint error
+      const response = await this.makeApiRequest('/send-message', 'POST', {
+        recipient,
+        message,
+        reply_to_message_id,
+        sender_number: 'me' // Add this field to fix the constraint error
+      });
 
       return {
         content: [
           {
             type: 'text',
-            text: `✅ Message sent successfully to "${targetChat.name || recipient}":\n\n"${message}"`,
+            text: `✅ ${response.message}:\n\n"${message}"`,
           },
         ],
       };
@@ -499,42 +373,32 @@ class WhatsAppActionsMCPServer {
   async handleListChats(args) {
     const { limit = 20, groups_only = false, contacts_only = false } = args;
     
-    if (!this.isWhatsAppReady) {
-      throw new Error('WhatsApp client is not ready. Please wait for connection.');
-    }
-
     try {
-      const chats = await this.whatsappClient.getChats();
+      const params = new URLSearchParams({
+        limit: limit.toString(),
+        groups_only: groups_only.toString(),
+        contacts_only: contacts_only.toString()
+      });
       
-      let filteredChats = chats;
-      if (groups_only) {
-        filteredChats = chats.filter(chat => chat.isGroup);
-      } else if (contacts_only) {
-        filteredChats = chats.filter(chat => !chat.isGroup);
-      }
+      const response = await this.makeApiRequest(`/chats?${params}`);
       
-      // Sort by last message time and limit
-      filteredChats = filteredChats
-        .sort((a, b) => b.lastMessage?.timestamp - a.lastMessage?.timestamp)
-        .slice(0, limit);
-
-      if (filteredChats.length === 0) {
+      if (response.chats.length === 0) {
         return {
           content: [{ type: 'text', text: 'No chats found.' }],
         };
       }
 
-      let result = `📋 **Available Chats (${filteredChats.length}):**\n\n`;
-      for (const chat of filteredChats) {
+      let result = `📋 **Available Chats (${response.chats.length}):**\n\n`;
+      for (const chat of response.chats) {
         const chatType = chat.isGroup ? '👥 Group' : '💬 Individual';
         const unreadCount = chat.unreadCount > 0 ? ` (${chat.unreadCount} unread)` : '';
-        const lastMessageTime = chat.lastMessage ? 
-          new Date(chat.lastMessage.timestamp * 1000).toLocaleString() : 'No messages';
+        const lastMessageTime = chat.lastMessageTime ? 
+          new Date(chat.lastMessageTime).toLocaleString() : 'No messages';
         
         result += `**${chatType}: ${chat.name}**${unreadCount}\n`;
         result += `**Last Activity:** ${lastMessageTime}\n`;
-        if (chat.isGroup) {
-          result += `**Participants:** ${chat.participants?.length || 'Unknown'}\n`;
+        if (chat.isGroup && chat.participantCount) {
+          result += `**Participants:** ${chat.participantCount}\n`;
         }
         result += `---\n\n`;
       }
@@ -610,13 +474,10 @@ class WhatsAppActionsMCPServer {
   async handleGetChatInfo(args) {
     const { chat_name } = args;
     
-    if (!this.isWhatsAppReady) {
-      throw new Error('WhatsApp client is not ready. Please wait for connection.');
-    }
-
     try {
-      const chats = await this.whatsappClient.getChats();
-      const chat = chats.find(c => 
+      // Get chat list and find the specific chat
+      const response = await this.makeApiRequest('/chats?limit=100');
+      const chat = response.chats.find(c => 
         c.name === chat_name || 
         c.name?.toLowerCase().includes(chat_name.toLowerCase())
       );
@@ -627,27 +488,16 @@ class WhatsAppActionsMCPServer {
 
       let result = `📋 **Chat Information: ${chat.name}**\n\n`;
       result += `**Type:** ${chat.isGroup ? '👥 Group Chat' : '💬 Individual Chat'}\n`;
-      result += `**ID:** ${chat.id._serialized}\n`;
+      result += `**ID:** ${chat.id}\n`;
       result += `**Unread Messages:** ${chat.unreadCount}\n`;
       
-      if (chat.lastMessage) {
-        const lastMessageTime = new Date(chat.lastMessage.timestamp * 1000).toLocaleString();
+      if (chat.lastMessageTime) {
+        const lastMessageTime = new Date(chat.lastMessageTime).toLocaleString();
         result += `**Last Message:** ${lastMessageTime}\n`;
-        result += `**Last Message From:** ${chat.lastMessage.author || 'Unknown'}\n`;
       }
       
-      if (chat.isGroup) {
-        result += `**Participants:** ${chat.participants?.length || 'Unknown'}\n`;
-        if (chat.participants && chat.participants.length > 0) {
-          result += `**Group Members:**\n`;
-          for (const participant of chat.participants.slice(0, 10)) {
-            const contact = await this.whatsappClient.getContactById(participant.id._serialized);
-            result += `  • ${contact.name || contact.number}\n`;
-          }
-          if (chat.participants.length > 10) {
-            result += `  ... and ${chat.participants.length - 10} more\n`;
-          }
-        }
+      if (chat.isGroup && chat.participantCount) {
+        result += `**Participants:** ${chat.participantCount}\n`;
       }
 
       return { content: [{ type: 'text', text: result }] };
@@ -659,28 +509,16 @@ class WhatsAppActionsMCPServer {
   async handleMarkAsRead(args) {
     const { chat_name } = args;
     
-    if (!this.isWhatsAppReady) {
-      throw new Error('WhatsApp client is not ready. Please wait for connection.');
-    }
-
     try {
-      const chats = await this.whatsappClient.getChats();
-      const chat = chats.find(c => 
-        c.name === chat_name || 
-        c.name?.toLowerCase().includes(chat_name.toLowerCase())
-      );
-      
-      if (!chat) {
-        throw new Error(`Chat "${chat_name}" not found.`);
-      }
-
-      await chat.sendSeen();
+      const response = await this.makeApiRequest('/mark-as-read', 'POST', {
+        chat_name
+      });
 
       return {
         content: [
           {
             type: 'text',
-            text: `✅ Marked chat "${chat.name}" as read.`,
+            text: `✅ ${response.message}`,
           },
         ],
       };
@@ -692,7 +530,7 @@ class WhatsAppActionsMCPServer {
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('WhatsApp Actions MCP Server running on stdio');
+    console.error('WhatsApp Actions MCP Server v2 running on stdio');
   }
 }
 

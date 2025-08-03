@@ -63,4 +63,4 @@ echo -e "${BLUE}Press Ctrl+C to stop the server${NC}"
 echo ""
 
 # Start the MCP server
-exec node src/mcp-server-actions.js
+exec node src/mcp-server-actions-v2.js
