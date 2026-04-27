@@ -11,5 +11,8 @@ echo ""
 # Set NODE_ENV if not set
 export NODE_ENV=${NODE_ENV:-production}
 
+# Use Playwright's arm64 Chromium (Puppeteer doesn't ship arm64 Linux builds)
+export PUPPETEER_EXECUTABLE_PATH=${PUPPETEER_EXECUTABLE_PATH:-/home/orrb/.cache/ms-playwright/chromium-1217/chrome-linux/chrome}
+
 # Start the listener service
 node src/whatsapp-listener.js
