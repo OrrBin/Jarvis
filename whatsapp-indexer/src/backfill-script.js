@@ -22,7 +22,7 @@ class WhatsAppBackfillScript {
 
     this.client = new Client({
       authStrategy: new LocalAuth({
-        clientId: "whatsapp-indexer-backfill",
+        clientId: "whatsapp-indexer",
         dataPath: "./.wwebjs_auth"
       }),
       puppeteer: {
