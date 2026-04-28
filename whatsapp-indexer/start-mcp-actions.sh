@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Use system libstdc++ (mise's bundled one lacks GLIBCXX_3.4.29 needed by faiss-node)
+export LD_PRELOAD=/usr/lib64/libstdc++.so.6
+
 # WhatsApp Actions MCP Server Starter
 # This script starts the WhatsApp Actions MCP server with message sending capabilities
 

@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Use system libstdc++ (mise's bundled one lacks GLIBCXX_3.4.29 needed by faiss-node)
+export LD_PRELOAD=/usr/lib64/libstdc++.so.6
+
 # WhatsApp Chat Lister Script Runner
 # This script provides an easy way to list all your WhatsApp chats
 

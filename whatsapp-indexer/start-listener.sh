@@ -11,6 +11,9 @@ echo ""
 # Set NODE_ENV if not set
 export NODE_ENV=${NODE_ENV:-production}
 
+# Use system libstdc++ (mise's bundled one lacks GLIBCXX_3.4.29 needed by faiss-node)
+export LD_PRELOAD=/usr/lib64/libstdc++.so.6
+
 # Use Playwright's arm64 Chromium (Puppeteer doesn't ship arm64 Linux builds)
 export PUPPETEER_EXECUTABLE_PATH=${PUPPETEER_EXECUTABLE_PATH:-/home/orrb/.cache/ms-playwright/chromium-1217/chrome-linux/chrome}
 

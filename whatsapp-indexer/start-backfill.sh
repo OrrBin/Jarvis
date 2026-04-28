@@ -15,9 +15,19 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}🚀 WhatsApp Message Backfill Script${NC}"
 echo -e "${BLUE}====================================${NC}"
 
+# Use system libstdc++ (mise's bundled one lacks GLIBCXX_3.4.29 needed by faiss-node)
+export LD_PRELOAD=/usr/lib64/libstdc++.so.6
+
 # Check if Node.js is available
 if ! command -v node &> /dev/null; then
     echo -e "${RED}❌ Node.js is not installed or not in PATH${NC}"
+    exit 1
+fi
+
+# Check if the listener is already running (can't share Chromium session simultaneously)
+if pgrep -f "whatsapp-listener.js" > /dev/null 2>&1; then
+    echo -e "${RED}❌ WhatsApp listener is currently running.${NC}"
+    echo -e "${YELLOW}Stop it first (pkill -f whatsapp-listener.js) — they share the same session.${NC}"
     exit 1
 fi
 
