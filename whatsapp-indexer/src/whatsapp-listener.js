@@ -226,6 +226,98 @@ class WhatsAppListener {
       }
     });
 
+    // Backfill endpoint — reuses the running client, no separate Chromium needed
+    app.post('/backfill', async (req, res) => {
+      if (!this.isReady) {
+        return res.status(503).json({ error: 'WhatsApp client is not ready' });
+      }
+      if (this._backfillRunning) {
+        return res.status(409).json({ error: 'Backfill already in progress' });
+      }
+
+      const { days = 7, maxMessages = 1000, chats: specificChats, exclude = [], dryRun = false, force = false } = req.body;
+      this._backfillRunning = true;
+
+      // Run in background so we can respond immediately
+      const stats = { totalChats: 0, processedChats: 0, totalMessages: 0, newMessages: 0, skippedMessages: 0, errors: 0 };
+      res.json({ status: 'started', days, dryRun });
+
+      try {
+        const allChats = await this.client.getChats();
+        let chatsToProcess = allChats;
+
+        if (specificChats?.length) {
+          chatsToProcess = chatsToProcess.filter(c =>
+            specificChats.some(n => c.name?.toLowerCase().includes(n.toLowerCase()) || c.id._serialized === n)
+          );
+        }
+        if (exclude.length) {
+          chatsToProcess = chatsToProcess.filter(c =>
+            !exclude.some(n => c.name?.toLowerCase().includes(n.toLowerCase()))
+          );
+        }
+
+        stats.totalChats = chatsToProcess.length;
+        const startDate = new Date(Date.now() - days * 86400000);
+        const endDate = new Date();
+
+        // Only process chats with activity in the backfill window
+        chatsToProcess = chatsToProcess.filter(c => {
+          const lastMsg = c.lastMessage?.timestamp;
+          return lastMsg && (lastMsg * 1000) >= startDate.getTime();
+        });
+
+        console.log(`🔄 Backfill started: ${chatsToProcess.length}/${stats.totalChats} active chats, ${days} days back${dryRun ? ' (DRY RUN)' : ''}`);
+
+        for (const chat of chatsToProcess) {
+          const chatName = chat.name || chat.id._serialized;
+          try {
+            // Check existing messages
+            const existing = await this.database.getMessagesByDateRange(startDate.getTime(), endDate.getTime(), null, chat.id._serialized);
+            if (existing.length > 0 && !force) {
+              console.log(`⏭️  Skipping ${chatName} — ${existing.length} messages already exist`);
+              stats.processedChats++;
+              continue;
+            }
+
+            const messages = await chat.fetchMessages({ limit: Math.min(50, maxMessages) });
+            const filtered = messages.filter(m => {
+              const t = m.timestamp * 1000;
+              return t >= startDate.getTime() && t <= endDate.getTime();
+            });
+
+            let newCount = 0;
+            for (const msg of filtered) {
+              try {
+                if (await this.database.messageExists(msg.id.id)) { stats.skippedMessages++; continue; }
+                const processed = await this.messageProcessor.processMessage(msg, chat, null);
+                if (!processed) { stats.skippedMessages++; continue; }
+                if (!dryRun) {
+                  await this.database.saveMessage(processed);
+                  await this.vectorStore.indexMessage(processed);
+                }
+                newCount++;
+                stats.newMessages++;
+              } catch (e) { stats.errors++; }
+            }
+            stats.totalMessages += filtered.length;
+            stats.skippedMessages += filtered.length - newCount - stats.errors;
+            console.log(`  📊 ${chatName}: ${newCount} new, ${filtered.length - newCount} skipped`);
+          } catch (e) {
+            console.error(`❌ Error processing ${chatName}:`, e.message);
+            stats.errors++;
+          }
+          stats.processedChats++;
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        console.log(`✅ Backfill complete:`, stats);
+      } catch (e) {
+        console.error('❌ Backfill failed:', e);
+      } finally {
+        this._backfillRunning = false;
+      }
+    });
+
     const port = process.env.WHATSAPP_API_PORT || 3001;
     this.apiServer = app.listen(port, () => {
       console.log(`🌐 WhatsApp API server running on port ${port}`);
@@ -251,16 +343,30 @@ class WhatsAppListener {
       console.error('❌ WhatsApp authentication failed:', msg);
     });
 
-    this.client.on('disconnected', (reason) => {
+    this.client.on('disconnected', async (reason) => {
       console.log('📱 WhatsApp client disconnected:', reason);
       this.isReady = false;
       
-      if (!this.isShuttingDown) {
-        console.log('🔄 Attempting to reconnect...');
-        setTimeout(() => {
-          this.client.initialize().catch(console.error);
-        }, 5000);
+      if (this.isShuttingDown) return;
+
+      // LOGOUT means credentials are revoked — session is wiped, reconnect would just show QR again
+      if (reason === 'LOGOUT') {
+        console.log('⚠️ Session was logged out by WhatsApp. Restart manually to re-scan QR.');
+        return;
       }
+
+      // For transient disconnects (network blips), destroy old client first to prevent stacking
+      console.log('🔄 Attempting to reconnect in 10s...');
+      try {
+        await this.client.destroy();
+      } catch (e) {
+        console.warn('⚠️ Error destroying old client (continuing):', e.message);
+      }
+      setTimeout(() => {
+        this.client.initialize().catch(err => {
+          console.error('❌ Reconnect failed:', err.message);
+        });
+      }, 10000);
     });
 
     this.client.on('message', async (message) => {
