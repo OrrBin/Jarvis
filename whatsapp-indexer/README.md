@@ -1,300 +1,261 @@
 # WhatsApp Indexer
 
-A WhatsApp message indexer that provides semantic search capabilities through a Model Context Protocol (MCP) server. The system is designed with a decoupled architecture where the MCP server only reads from the indexed data, while a separate service handles WhatsApp message listening and indexing.
+A WhatsApp message indexer with semantic search and full read/write actions, exposed to AI agents through a Model Context Protocol (MCP) server.
+
+The system uses a **single long-running listener** that owns the only WhatsApp Web connection. The listener indexes messages and exposes an HTTP API. A separate, lightweight **MCP server** reads the index directly and delegates all live WhatsApp actions (send, list chats, mark read, backfill) to the listener over HTTP. This keeps exactly one WhatsApp session alive while letting agents connect and disconnect freely.
 
 ## Architecture
 
-The system consists of two main components:
+```
+                       WhatsApp Web (single session, clientId "whatsapp-indexer")
+                                  |
+                                  v
+   +--------------------------------------------------------------+
+   |  whatsapp-listener.js  (long-running service)               |
+   |  - Only process that connects to WhatsApp Web (Puppeteer)    |
+   |  - Indexes messages -> SQLite + FAISS vector store           |
+   |  - Express HTTP API on port 3001:                            |
+   |      GET  /status        POST /send-message                  |
+   |      GET  /chats         POST /mark-as-read                   |
+   |      POST /backfill                                           |
+   +--------------------------------------------------------------+
+        ^ reads DB/vectors directly        ^ HTTP (localhost:3001)
+        |                                   |
+   +-------------------------------+   +--------------------------+
+   | mcp-server-actions-v2.js      |   | backfill.sh / curl       |
+   | (MCP server "whatsapp-actions"| -->| POST /backfill           |
+   |  v2.0.0, stdio transport)     |   +--------------------------+
+   | - search/status: read DB      |
+   | - send/list/mark/latest:      |
+   |   call listener HTTP API      |
+   +-------------------------------+
+        ^ stdio (spawned by your MCP client)
+```
 
-### 1. WhatsApp Listener Service (`whatsapp-listener.js`)
-- Connects to WhatsApp Web using `whatsapp-web.js`
-- Receives and processes incoming/outgoing messages
-- Extracts URLs and metadata from messages
-- Stores messages in SQLite database
-- Indexes messages in a local vector store for semantic search
-- Runs independently and continuously processes messages
+### 1. WhatsApp Listener (`src/whatsapp-listener.js`)
+- The **only** component that connects to WhatsApp Web (via `whatsapp-web.js` + Puppeteer/Chromium).
+- Receives incoming/outgoing messages and indexes them into SQLite + a local FAISS vector store.
+- Exposes an Express HTTP API (default port `3001`, override with `WHATSAPP_API_PORT`):
+  - `GET /status` - readiness and auth state
+  - `POST /send-message` - send a text message (optionally a reply)
+  - `GET /chats` - list chats
+  - `POST /mark-as-read` - mark a chat read
+  - `POST /backfill` - index historical messages, reusing the live client
+- Runs continuously as a background service with auto-restart.
 
-### 2. MCP Server (`mcp-server-standalone.js`)
-- Provides MCP tools for querying indexed messages
-- Only reads from the database and vector store
-- Does not connect to WhatsApp directly
-- Can run independently of the WhatsApp connection
-- Provides semantic search, URL extraction, and date-based queries
+### 2. MCP Server (`src/mcp-server-actions-v2.js`)
+- MCP server name `whatsapp-actions`, version `2.0.0`, stdio transport - spawned on demand by your MCP client.
+- **Does not open its own WhatsApp connection.** It:
+  - Reads SQLite + vector store directly for `search_messages` and parts of `whatsapp_status`.
+  - Delegates all live actions to the listener's HTTP API (`WHATSAPP_API_URL`, default `http://localhost:3001`).
+- This is the **current** entry point. The older `mcp-server-standalone.js` / `mcp-server-enhanced.js` files are legacy and no longer used.
 
-## Features
+## Requirements
 
-- **Semantic Search**: Find messages using natural language queries
-- **URL Extraction**: Automatically extract and index URLs from messages
-- **Date-based Queries**: Search messages by date ranges
-- **Sender Filtering**: Filter messages by specific senders
-- **Schedule Detection**: Find scheduling-related conversations
-- **Plan Checking**: Check for plans on specific days
-- **Chat Discovery**: List all chats with identifiers for selective indexing
-- **Historical Backfill**: Index messages from past days/weeks/months
-- **Persistent Storage**: SQLite database with full-text search
-- **Vector Search**: Local FAISS-based semantic search using Transformers.js
+- **Node.js 20.x.**
+- **`faiss-node` needs a recent `libstdc++`.** Some Node version managers bundle an older `libstdc++` that lacks `GLIBCXX_3.4.29`, which `faiss-node` requires. If you hit a `GLIBCXX` load error, preload the system library:
+  ```bash
+  export LD_PRELOAD=/usr/lib64/libstdc++.so.6   # adjust path for your distro
+  ```
+  Every shell script and the service definition set this.
+- **A Chromium binary for Puppeteer.** On platforms where Puppeteer does not ship a prebuilt browser (e.g. arm64 Linux), point it at an existing Chromium via `PUPPETEER_EXECUTABLE_PATH` (for example a Playwright-installed Chromium).
 
 ## Installation
 
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Copy the environment configuration:
-   ```bash
-   cp .env.example .env
-   ```
-
-4. Edit `.env` with your preferred settings (optional - defaults work fine)
-
-## Usage
-
-### Option 1: Run Both Services (Recommended)
-
-1. **Start the WhatsApp Listener Service** (in one terminal):
-   ```bash
-   ./start-listener.sh
-   ```
-   - Scan the QR code with your WhatsApp mobile app
-   - Wait for "WhatsApp client is ready!" message
-   - Leave this running to continuously index new messages
-
-2. **Start the MCP Server** (in another terminal):
-   ```bash
-   ./start-mcp-standalone.sh
-   ```
-   - This provides the MCP tools for querying messages
-   - Can be restarted without affecting WhatsApp connection
-
-### Option 2: MCP Server Only (Query Existing Data)
-
-If you already have indexed messages and just want to query them:
-
 ```bash
-./start-mcp-standalone.sh
+npm install
 ```
 
-## Chat Discovery
+Optional: copy `.env.example` to `.env` to override defaults (defaults work out of the box).
 
-Before running backfill operations, you can list all your WhatsApp chats to identify which ones you want to include or exclude:
+## Running the Listener (the always-on service)
 
-### List All Chats
+The listener is intended to run as a managed background service (e.g. a `systemd` user service) so it restarts automatically and survives logout.
+
+A `systemd` user unit should:
+- Set `LD_PRELOAD` (if needed) and `PUPPETEER_EXECUTABLE_PATH`.
+- Run `cleanup-chrome.sh` as `ExecStartPre` to kill orphaned Chromium processes and remove the stale `SingletonLock` before each start.
+- Restart on failure (e.g. `Restart=on-failure`, `RestartSec=15`). Enable `linger` so it survives logout.
+
+Typical service management:
 ```bash
-./list-chats.sh
+systemctl --user status whatsapp-listener.service
+journalctl --user -u whatsapp-listener.service -f
+
+systemctl --user start whatsapp-listener.service
+systemctl --user restart whatsapp-listener.service
+systemctl --user stop whatsapp-listener.service
 ```
 
-This shows all your chats sorted by most recent activity, with their names and IDs.
+**First-run authentication:** watch the logs and scan the QR code with your WhatsApp mobile app. The session persists in `.wwebjs_auth/` for future restarts.
 
-### Filter Options
+### Manually (for debugging)
 ```bash
-# Show only group chats
-./list-chats.sh --groups-only
+./start-listener.sh
+```
+This sets the same env vars and runs `node src/whatsapp-listener.js` in the foreground. Stop the background service first - only one WhatsApp connection is allowed at a time.
 
-# Show only individual chats  
-./list-chats.sh --individual-only
+## Running the MCP Server
 
-# Show top 20 most recent chats
-./list-chats.sh --limit 20
+The MCP server is **spawned by your MCP client**, not run by hand. It talks to the client over stdio and to the listener over HTTP.
 
-# Show detailed information
-./list-chats.sh --verbose
+### MCP client config
+
+Register the server in your MCP client config. Invoke it **directly with node and explicit env vars** (no shell wrapper):
+
+```json
+{
+  "whatsapp-actions": {
+    "command": "node",
+    "args": [
+      "/path/to/whatsapp-indexer/src/mcp-server-actions-v2.js"
+    ],
+    "env": {
+      "NODE_PATH": "/path/to/whatsapp-indexer/node_modules",
+      "DATABASE_PATH": "/path/to/whatsapp-indexer/data/messages.db",
+      "VECTOR_STORE_PATH": "/path/to/whatsapp-indexer/data/vector_store",
+      "LD_PRELOAD": "/usr/lib64/libstdc++.so.6"
+    },
+    "autoApprove": [
+      "whatsapp_status",
+      "get_latest_messages",
+      "search_messages",
+      "list_chats",
+      "get_chat_info"
+    ]
+  }
+}
 ```
 
-### Using Chat Information for Backfill
-After listing chats, you can use their names or IDs in backfill commands:
+Notes:
+- Use the absolute path to your Node 20 binary if `node` on `PATH` is not v20.
+- `DATABASE_PATH` / `VECTOR_STORE_PATH` must point at the same data dir the listener writes to.
+- `WHATSAPP_API_URL` defaults to `http://localhost:3001`; set it only if you changed the listener port.
+- The five read-only tools are auto-approved; `send_message` and `mark_as_read` are intentionally left to require approval.
 
+### Manually (for debugging)
 ```bash
-# Backfill specific chats by name
-./start-backfill.sh --chat "Family Group" --chat "Work Team" --days 7
-
-# Exclude specific chats
-./start-backfill.sh --exclude "Noisy Group" --exclude "Spam" --days 30
+./start-mcp-actions.sh   # runs: node src/mcp-server-actions-v2.js
 ```
-
-## Historical Backfill
-
-Index messages from the past using the backfill script:
-
-### Basic Usage
-```bash
-# Backfill last 7 days (default)
-./start-backfill.sh
-
-# Backfill specific time period
-./start-backfill.sh --days 30
-
-# Test without saving (dry run)
-./start-backfill.sh --dry-run --verbose --days 7
-```
-
-### Advanced Options
-```bash
-# Specific chats only
-./start-backfill.sh --chat "Important Group" --days 14
-
-# Exclude certain chats
-./start-backfill.sh --exclude "Work" --exclude "Notifications" --days 30
-
-# Limit messages per chat
-./start-backfill.sh --max-messages 500 --days 60
-
-# Force re-indexing
-./start-backfill.sh --force --days 7
-```
-
-See [BACKFILL.md](BACKFILL.md) for detailed backfill documentation.
+The listener must already be running for live actions to work.
 
 ## MCP Tools
 
-The MCP server provides the following tools:
+| Tool | Backed by | Description |
+|------|-----------|-------------|
+| `whatsapp_status` | listener API + local | Client/indexer readiness and stats |
+| `get_latest_messages` | listener API | Latest messages from all chats or one chat (`chat_name`, `limit`, `include_sent`) |
+| `search_messages` | local vector store | Natural-language search, Hebrew + English (`query`, `limit`, `chat_name`) |
+| `list_chats` | listener API | List chats (`limit`, `groups_only`, `individual_only`) |
+| `get_chat_info` | listener API | Details about a specific chat (`chat_name`) |
+| `send_message` | listener API | Send a message to a contact/group (`recipient`, `message`, `reply_to_message_id`) |
+| `mark_as_read` | listener API | Mark a chat as read (`chat_name`) |
 
-### `whatsapp_status`
-Check the status of the WhatsApp indexer service
-- Shows total indexed messages
-- Shows last message timestamp
-- Indicates if the system is ready
+## Historical Backfill
 
-### `search_messages`
-Search messages using natural language queries
-- **query** (required): Natural language search query
-- **limit** (optional): Maximum results to return (default: 10)
+Backfill runs **through the live listener** - no separate Chromium/session is started. The listener must be running.
 
-Example: "find the restaurant recommendation from John"
+```bash
+# Last 7 days (default)
+./backfill.sh
 
-### `get_urls_by_sender`
-Get all URLs shared by a specific person
-- **sender_name** (required): Name of the sender
-- **limit** (optional): Maximum URLs to return (default: 20)
+# Specific window
+./backfill.sh --days 30
 
-### `get_messages_by_date`
-Get messages from a specific date or date range
-- **date_query** (required): Date in natural language (e.g., "today", "last Monday")
-- **sender_name** (optional): Filter by specific sender
+# Specific chats (repeatable) / exclusions (repeatable)
+./backfill.sh --chat "Family Group" --chat "Work Team" --days 14
+./backfill.sh --exclude "Noisy Group" --days 30
 
-### `find_schedule_with_person`
-Find scheduling-related messages with a specific person
-- **person_name** (required): Name of the person
-- **time_period** (optional): Time period to search (default: "this week")
-
-### `check_plans_for_day`
-Check for plans or appointments on a specific day
-- **day** (required): Day to check (e.g., "Wednesday", "tomorrow")
-
-## Configuration
-
-Edit `.env` to customize:
-
-```env
-# Database
-DATABASE_PATH=./data/messages.db
-
-# Vector Store
-VECTOR_STORE_PATH=./data/vectors
-VECTOR_MODEL=Xenova/all-MiniLM-L6-v2
-VECTOR_DIMENSION=384
-
-# Logging
-LOG_LEVEL=info
+# Dry run (don't save) / force re-process existing chats
+./backfill.sh --dry-run --days 7
+./backfill.sh --force --days 7
 ```
+
+Under the hood `backfill.sh` POSTs to `http://localhost:3001/backfill` (override port with `WHATSAPP_API_PORT`). The endpoint:
+- Returns immediately (`{"status":"started"}`) and runs in the background - watch the listener logs for progress.
+- Only processes chats with activity inside the requested window.
+- Skips chats that already have indexed messages in the window unless `--force` is given.
+- Rejects concurrent runs (`409`) and requires the client to be ready (`503` otherwise).
+
+> The older `start-backfill.sh` (which spun up its own WhatsApp client) is legacy. Prefer `backfill.sh` so you don't fight the listener for the single allowed session.
+
+## Chat Discovery
+
+```bash
+./list-chats.sh                 # all chats, most recent first
+./list-chats.sh --groups-only
+./list-chats.sh --individual-only
+./list-chats.sh --limit 20
+```
+Or use the `list_chats` MCP tool. Note: `list-chats.sh` connects to WhatsApp directly, so stop the listener first (only one session allowed) or just use the `list_chats` MCP tool which goes through the running listener.
 
 ## Data Storage
 
-- **SQLite Database**: `./data/messages.db` - Stores message content, metadata, and URLs
-- **Vector Store**: `./data/vectors/` - FAISS index and metadata for semantic search
-- **WhatsApp Session**: `./.wwebjs_auth/` - WhatsApp Web authentication data
+- **SQLite database**: `./data/messages.db` (`DATABASE_PATH`)
+- **Vector store**: `./data/vector_store/` - FAISS index + metadata (`VECTOR_STORE_PATH`)
+- **WhatsApp session**: `./.wwebjs_auth/session-whatsapp-indexer/`
 
-## Architecture Benefits
+## Configuration
 
-### Decoupled Design
-- MCP server can run without WhatsApp connection
-- WhatsApp listener can restart without affecting queries
-- Better reliability and maintainability
+Defaults live in `src/config.js` and can be overridden via env vars (or `.env`):
 
-### Scalability
-- Multiple MCP servers can read from the same data
-- WhatsApp listener runs independently
-- Easy to add more data sources
-
-### Development
-- Test MCP tools without WhatsApp setup
-- Develop features using existing data
-- Clear separation of concerns
+| Variable | Default | Used by |
+|----------|---------|---------|
+| `DATABASE_PATH` | `./data/messages.db` | listener + MCP server |
+| `VECTOR_STORE_PATH` | `./data/vector_store` | listener + MCP server |
+| `MODEL_NAME` | `Xenova/all-MiniLM-L6-v2` | vector store |
+| `WHATSAPP_API_PORT` | `3001` | listener HTTP API |
+| `WHATSAPP_API_URL` | `http://localhost:3001` | MCP server -> listener |
+| `LD_PRELOAD` | system `libstdc++` path (if needed) | faiss-node native module |
+| `PUPPETEER_EXECUTABLE_PATH` | path to a Chromium binary | listener (Puppeteer) |
 
 ## Troubleshooting
 
-### Phone Numbers Instead of Contact Names
+### `GLIBCXX_3.4.29 not found` / faiss-node fails to load
+Your active `libstdc++` is too old. Ensure `LD_PRELOAD` points at a recent system `libstdc++.so.6`. All shell scripts and the service unit set this; if you run node directly, set it yourself.
 
-**Problem**: Individual chats show phone numbers (e.g., "+972 54-746-6694") instead of contact names.
+### Listener won't start / "Failed to launch the browser process"
+Puppeteer can't find a usable Chromium. Set `PUPPETEER_EXECUTABLE_PATH` to a Chromium binary. If a previous run crashed, stale Chromium processes or a `SingletonLock` may block startup - `cleanup-chrome.sh` handles this on service start, or run it manually:
+```bash
+./cleanup-chrome.sh
+```
 
-**Cause**: WhatsApp Web sometimes doesn't have access to your phone's contact names, especially for contacts that aren't frequently messaged.
+### Live tools fail but search works
+The MCP server can read the index but can't reach the listener. Check the listener is up and the API responds:
+```bash
+systemctl --user status whatsapp-listener.service
+curl -s http://localhost:3001/status
+```
 
-**Solutions**:
+### Multiple connection / session conflicts
+Only one process may hold the WhatsApp session. Don't run `start-listener.sh`, `start-backfill.sh`, or `list-chats.sh` while the background listener is active. Use the MCP tools / `backfill.sh` (which go through the running listener) instead.
 
-1. **For new messages**: The updated code now prioritizes contact names over chat names for individual chats.
+### Phone numbers instead of contact names
+WhatsApp Web sometimes lacks contact names. New messages prefer contact names; for existing rows, stop the listener and run `./fix-contact-names.sh`, then restart.
 
-2. **For existing messages**: Run the contact name fixer:
-   ```bash
-   # Stop the WhatsApp listener first (only one connection allowed)
-   pkill -f whatsapp-listener.js
-   
-   # Run the fixer
-   ./fix-contact-names.sh
-   
-   # Restart the listener
-   ./start-listener.sh
-   ```
+## Project Structure (current)
 
-3. **Manual verification**: Check what names are available:
-   ```bash
-   ./list-chats.sh --individual-only --verbose
-   ```
-
-**Note**: Some contacts may still show as phone numbers if:
-- They're not in your phone's address book
-- WhatsApp Web doesn't have permission to access contact names
-- The contact hasn't set a display name in WhatsApp
-
-### WhatsApp Connection Issues
-- Make sure only the listener service connects to WhatsApp
-- Check QR code scanning in the listener terminal
-- Restart only the listener service if connection fails
-
-### MCP Server Issues
-- MCP server doesn't need WhatsApp connection
-- Check if database and vector store files exist
-- Restart MCP server independently
-
-### No Messages Found
-- Ensure WhatsApp listener service is running
-- Check that messages are being indexed (watch listener logs)
-- Verify database has data: check `./data/messages.db`
-
-### Performance
-- Vector search may be slow on first run (model download)
-- Subsequent searches are much faster
-- Consider adjusting `VECTOR_DIMENSION` for speed vs accuracy
-
-## Development
-
-### Project Structure
 ```
 src/
-├── mcp-server-standalone.js    # Standalone MCP server (recommended)
-├── whatsapp-listener.js        # WhatsApp message listener
-├── database.js                 # SQLite database operations
+├── whatsapp-listener.js        # Always-on listener: WhatsApp connection + indexing + HTTP API
+├── mcp-server-actions-v2.js    # Current MCP server (whatsapp-actions v2.0.0)
+├── database.js                 # SQLite operations
 ├── local-vector-store.js       # FAISS vector store
-├── message-processor.js        # Message processing logic
-├── config.js                   # Configuration management
-└── backfill-script.js          # Historical message backfill
-```
+├── message-processor.js        # Message processing
+├── hebrew-processor.js         # Hebrew text handling
+├── config.js                   # Config / env defaults
+└── backfill-script.js          # Legacy standalone backfill (prefer backfill.sh -> listener API)
 
-### Adding New Features
-1. Add database schema changes in `database.js`
-2. Update message processing in `message-processor.js`
-3. Add new MCP tools in `mcp-server-standalone.js`
-4. Update vector indexing if needed in `local-vector-store.js`
+scripts (repo root)
+├── start-listener.sh           # Run listener in foreground (debug)
+├── start-mcp-actions.sh        # Run MCP server in foreground (debug)
+├── backfill.sh                 # Backfill via listener HTTP API (preferred)
+├── cleanup-chrome.sh           # Kill orphaned Chromium + remove SingletonLock (service ExecStartPre)
+├── list-chats.sh               # List chats (connects directly; stop listener first)
+└── fix-contact-names.sh        # Backfill contact names for existing rows
+
+Legacy / unused: mcp-server-standalone.js, mcp-server-enhanced.js, enhanced-*.js, start-mcp-standalone.sh
+```
 
 ## License
 
